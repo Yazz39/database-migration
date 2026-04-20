@@ -1,0 +1,19 @@
+name: Database Migration
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate skill structure
+        run: |
+          test -f SKILL.md
+          test -f README.md
+          test -f SETUP.md
+          test -f EXAMPLES.md
+          test -f LICENSE
