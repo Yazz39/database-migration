@@ -92,6 +92,33 @@ the API cannot:
 Anything inside the guest needs shell access. The API's only lever over
 in-guest state is `reboot`, which clears RAM by restarting everything.
 
+### `fix-hermes.sh` — repair, then verify
+
+Diagnoses why the agent keeps dying, fixes the usual causes, and watches it
+for 20s to confirm it stays up rather than crash-looping.
+
+```bash
+sudo bash fix-hermes.sh --dry-run     # show the plan, change nothing
+sudo bash fix-hermes.sh               # diagnose, repair, verify
+sudo bash fix-hermes.sh --agent NAME  # if the service is not called "hermes"
+```
+
+What it repairs:
+
+| Problem | Fix |
+|---------|-----|
+| No swap on a small VPS | Creates a right-sized swapfile, persists it in `/etc/fstab`, sets `vm.swappiness=10` |
+| Service dies and stays dead | systemd drop-in with `Restart=always`, `RestartSec=5`, `OOMPolicy=continue` |
+| No service at all | `--create-unit '/path/to/hermes --flags'` writes and enables a unit |
+| Disk full | Reports the biggest directories — deletes nothing on its own |
+
+It reports what it found and what it changed, and prints the failing log
+lines if the agent still will not stay up.
+
+**Why swap first:** a budget VPS with 1–2GB RAM and no swap gives the kernel
+no option but to OOM-kill the largest process when an agent spikes. That
+process is usually the agent. Swap turns a fatal kill into a slow moment.
+
 ### `vps-diagnose.sh`
 
 For in-guest work, `vps-diagnose.sh` runs **on the VPS** over SSH:
