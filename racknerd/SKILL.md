@@ -64,6 +64,14 @@ form.
 | `vnc` | VNC connection details |
 | `raw ACTION key=value...` | Any other SolusVM client action |
 
+## Boundaries
+
+The client API controls the hypervisor, not the guest OS. It cannot clear
+cache, restart services, read logs, or run commands inside the VPS — those
+need SSH. Use `vps-diagnose.sh` on the VPS for in-guest diagnosis and cache
+reclamation; it declines to drop caches when memory is healthy, since page
+cache is not a leak.
+
 ## Guardrails
 
 - Credentials are sent as POST fields, never in a URL.

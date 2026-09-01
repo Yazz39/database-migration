@@ -79,6 +79,46 @@ fi
 | 2 | missing or invalid configuration |
 | 3 | interrupted |
 
+## What this API cannot do
+
+The SolusVM client API talks to the **hypervisor**, not to the operating
+system inside your VPS. There is no "run a command in the guest" action, so
+the API cannot:
+
+- clear cache memory, flush buffers, or free RAM
+- restart a service, tail a log, or inspect a process
+- read or write files on the VPS
+
+Anything inside the guest needs shell access. The API's only lever over
+in-guest state is `reboot`, which clears RAM by restarting everything.
+
+### `vps-diagnose.sh`
+
+For in-guest work, `vps-diagnose.sh` runs **on the VPS** over SSH:
+
+```bash
+scp racknerd/vps-diagnose.sh you@your-vps:/tmp/
+ssh you@your-vps 'sudo bash /tmp/vps-diagnose.sh'                  # report only
+ssh you@your-vps 'sudo bash /tmp/vps-diagnose.sh --drop-caches'    # reclaim if needed
+ssh you@your-vps 'sudo bash /tmp/vps-diagnose.sh --agent hermes'   # check your agent
+```
+
+It reports load, memory, swap, top consumers, OOM kills, disk, and your
+agent's service state, then tells you which of those is actually the
+problem.
+
+On cache specifically: `--drop-caches` **declines to act** when memory is
+healthy, because a large page cache is not a leak. Linux keeps recently read
+files in otherwise-idle RAM and evicts them automatically the moment a
+process needs the memory — `MemAvailable` already counts that cache as
+free. Dropping it forces every subsequent read back to disk, so the usual
+result is a slower server and an unchanged problem. Pass `--force` to
+override the guard.
+
+If an agent is unresponsive, the causes worth checking first are OOM kills,
+swap thrash, a full disk, and the agent's own logs. The script surfaces all
+four.
+
 ## Safety behavior
 
 - **POST, not GET.** The key and hash travel in the request body, so they

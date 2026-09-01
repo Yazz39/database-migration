@@ -31,6 +31,9 @@ jobs:
           test -f racknerd/README.md
           test -f racknerd/.env.example
           test -x racknerd/racknerd.py
+          test -x racknerd/vps-diagnose.sh
+      - name: Shell syntax check
+        run: bash -n racknerd/vps-diagnose.sh
       - name: Run racknerd tests
         run: python3 -m unittest discover -s racknerd -v
       - name: Ensure no credentials are committed
