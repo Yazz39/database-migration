@@ -29,7 +29,11 @@ while [ $# -gt 0 ]; do
         --no-swap)     DO_SWAP=0 ;;
         --create-unit) CREATE_UNIT="${2:?--create-unit needs a command}"; shift ;;
         --dry-run)     DRY_RUN=1 ;;
-        -h|--help)     sed -n '2,16p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -h|--help)
+            if [ -r "$0" ]; then sed -n '2,16p' "$0" | sed 's/^# \?//'
+            else echo "fix-hermes.sh: repair and verify an agent service."; fi
+            echo "Options: --agent NAME | --swap SIZE | --no-swap | --create-unit CMD | --dry-run"
+            exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
     shift
@@ -44,7 +48,13 @@ have() { command -v "$1" >/dev/null 2>&1; }
 run()  { if [ "$DRY_RUN" -eq 1 ]; then act "would run: $*"; else "$@"; fi; }
 meminfo() { awk -v k="$1" '$1==k":"{print $2}' /proc/meminfo; }
 
-SCRIPT_NAME=$(basename "$0")
+SCRIPT_NAME=$(basename "$0" 2>/dev/null)
+# Piped in (curl ... | bash) makes $0 "bash". Filtering on that would exclude
+# every bash-wrapped process -- including the agent we are looking for -- so
+# fall back to a sentinel that cannot over-match.
+case "$SCRIPT_NAME" in
+    bash|sh|dash|zsh|-bash|-sh|"") SCRIPT_NAME="fix-hermes.sh" ;;
+esac
 # pgrep -f matches our own argv (the script path and --agent NAME both contain
 # the agent name), so filter ourselves out by reading each cmdline.
 find_agent_pids() {
@@ -61,6 +71,25 @@ find_agent_pids() {
     echo "${out# }"
 }
 
+# Anything that looks like a user's agent rather than a distro service.
+AGENT_PATTERN='hermes|agent|bot|claude|opencode|llm|assistant'
+
+list_unit_candidates() {
+    systemctl list-units --type=service --all --no-legend --plain 2>/dev/null \
+        | awk '{print $1}' | grep -iE "$AGENT_PATTERN" \
+        | grep -viE 'systemd|dbus|polkit|networkd|resolved|udev|cron|ssh|getty' || true
+}
+
+list_docker_candidates() {
+    have docker || return 0
+    docker ps -a --format '{{.Names}}' 2>/dev/null | grep -iE "$AGENT_PATTERN" || true
+}
+
+list_proc_candidates() {
+    ps -eo comm= 2>/dev/null | sort -u | grep -iE "$AGENT_PATTERN" \
+        | grep -viE 'fix-hermes|vps-diagnose' || true
+}
+
 FIXES=()
 PROBLEMS=()
 
@@ -74,6 +103,7 @@ hr "What is wrong"
 
 HAS_SYSTEMD=0
 UNIT=""
+DOCKER_NAME=""
 if have systemctl && systemctl list-units >/dev/null 2>&1; then
     HAS_SYSTEMD=1
     for candidate in "$AGENT" "$AGENT.service" "${AGENT}d" "${AGENT}-agent"; do
@@ -98,8 +128,41 @@ elif pids=$(find_agent_pids); [ -n "$pids" ]; then
     ps -o pid,rss,etime,cmd -p $pids 2>/dev/null | tail -n +2 | cut -c1-100 | sed 's/^/    /'
     PROBLEMS+=("no systemd unit -- nothing restarts $AGENT when it dies")
 else
-    bad "$AGENT is not running and has no systemd unit"
-    PROBLEMS+=("$AGENT is not running")
+    # Not found under the name we were given -- go looking before giving up,
+    # so a differently-named service does not cost a whole extra round trip.
+    warn "no service or process named '$AGENT'; searching for it..."
+    CAND_UNITS=$(list_unit_candidates)
+    CAND_DOCKER=$(list_docker_candidates)
+    CAND_PROCS=$(list_proc_candidates)
+
+    if [ "$(echo "$CAND_UNITS" | grep -c .)" = "1" ] && [ -n "$CAND_UNITS" ]; then
+        UNIT="$CAND_UNITS"
+        AGENT="${UNIT%.service}"
+        ok "found it: $UNIT -- continuing with that"
+        STATE=$(systemctl is-active "$UNIT" 2>/dev/null)
+        echo "  state: $STATE"
+        [ "$STATE" != "active" ] && PROBLEMS+=("$UNIT is $STATE")
+    elif [ -n "$CAND_DOCKER" ] && [ "$(echo "$CAND_DOCKER" | grep -c .)" = "1" ]; then
+        DOCKER_NAME="$CAND_DOCKER"
+        ok "found a Docker container: $DOCKER_NAME -- continuing with that"
+        DSTATE=$(docker inspect -f '{{.State.Status}}' "$DOCKER_NAME" 2>/dev/null)
+        echo "  state: $DSTATE"
+        [ "$DSTATE" != "running" ] && PROBLEMS+=("container $DOCKER_NAME is $DSTATE")
+    else
+        bad "$AGENT is not running and has no systemd unit"
+        PROBLEMS+=("$AGENT is not running")
+        if [ -n "$CAND_UNITS$CAND_DOCKER$CAND_PROCS" ]; then
+            echo
+            echo "  Candidates found on this box -- re-run with --agent NAME:"
+            [ -n "$CAND_UNITS" ]  && echo "$CAND_UNITS"  | sed 's/^/    service:   /'
+            [ -n "$CAND_DOCKER" ] && echo "$CAND_DOCKER" | sed 's/^/    container: /'
+            [ -n "$CAND_PROCS" ]  && echo "$CAND_PROCS"  | sed 's/^/    process:   /'
+        else
+            echo "  Nothing agent-shaped found. All enabled services:"
+            systemctl list-unit-files --state=enabled --no-legend --plain 2>/dev/null \
+                | awk '{print $1}' | head -20 | sed 's/^/    /'
+        fi
+    fi
 fi
 
 # Why did it die?
@@ -258,11 +321,27 @@ elif [ "$HAS_SYSTEMD" -eq 1 ]; then
     echo "     re-run with: --create-unit '/full/path/to/hermes --your --flags'"
 fi
 
+# 2b. docker: make the container come back by itself
+if [ -n "$DOCKER_NAME" ]; then
+    POLICY=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$DOCKER_NAME" 2>/dev/null)
+    if [ "$POLICY" = "always" ] || [ "$POLICY" = "unless-stopped" ]; then
+        ok "container restart policy is already '$POLICY'"
+    else
+        act "setting container restart policy to unless-stopped"
+        run docker update --restart unless-stopped "$DOCKER_NAME" >/dev/null 2>&1
+        FIXES+=("restart policy for container $DOCKER_NAME")
+    fi
+fi
+
 # 3. start it
 if [ -n "$UNIT" ]; then
     act "restarting $UNIT"
     run systemctl restart "$UNIT"
     FIXES+=("restarted $UNIT")
+elif [ -n "$DOCKER_NAME" ]; then
+    act "restarting container $DOCKER_NAME"
+    run docker restart "$DOCKER_NAME" >/dev/null 2>&1
+    FIXES+=("restarted container $DOCKER_NAME")
 fi
 
 # ---------------------------------------------------------------- verify
@@ -296,8 +375,21 @@ elif [ -n "$UNIT" ]; then
         echo "  failure output:"
         journalctl -u "$UNIT" -n 20 --no-pager 2>/dev/null | tail -20 | cut -c1-120 | sed 's/^/    /'
     fi
+elif [ -n "$DOCKER_NAME" ]; then
+    echo "  watching container for ${SETTLE}s..."
+    BEFORE=$(docker inspect -f '{{.RestartCount}}' "$DOCKER_NAME" 2>/dev/null || echo 0)
+    sleep "$SETTLE"
+    DSTATE=$(docker inspect -f '{{.State.Status}}' "$DOCKER_NAME" 2>/dev/null)
+    AFTER=$(docker inspect -f '{{.RestartCount}}' "$DOCKER_NAME" 2>/dev/null || echo 0)
+    if [ "$DSTATE" = "running" ] && [ "${AFTER:-0}" -le "${BEFORE:-0}" ]; then
+        ok "container $DOCKER_NAME is running and stable for ${SETTLE}s"
+    else
+        bad "container $DOCKER_NAME is '$DSTATE' (restarts ${BEFORE:-0} -> ${AFTER:-0})"
+        echo "  last logs:"
+        docker logs --tail 20 "$DOCKER_NAME" 2>&1 | cut -c1-120 | sed 's/^/    /'
+    fi
 else
-    warn "no unit to verify; check your agent by hand"
+    warn "nothing to verify; check your agent by hand"
 fi
 
 # ---------------------------------------------------------------- summary
@@ -318,4 +410,7 @@ printf '\n  RAM %sM | swap now %sM\n' "$TOTAL_MB" "$(( $(meminfo SwapTotal) / 10
 if [ -n "$UNIT" ] && [ "$DRY_RUN" -eq 0 ]; then
     echo "  $UNIT: $(systemctl is-active "$UNIT" 2>/dev/null)"
     echo "  follow it live:  journalctl -u $UNIT -f"
+elif [ -n "$DOCKER_NAME" ] && [ "$DRY_RUN" -eq 0 ]; then
+    echo "  $DOCKER_NAME: $(docker inspect -f '{{.State.Status}}' "$DOCKER_NAME" 2>/dev/null)"
+    echo "  follow it live:  docker logs -f $DOCKER_NAME"
 fi
