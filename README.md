@@ -26,6 +26,23 @@ Ask your AI agent:
 - "Validate data before migration"
 - "Compare production and staging schemas"
 
+## Also in this repo
+
+### RackNerd VPS API (`racknerd/`)
+
+A zero-dependency CLI for controlling a RackNerd VPS through the SolusVM
+client API — status, power actions, hostname, root password, serial console.
+Credentials live in the environment, never in the repo.
+
+```bash
+export RACKNERD_API_URL="https://<panel-host>/api/client/command.php"
+export RACKNERD_API_KEY="..."
+export RACKNERD_API_HASH="..."
+python3 racknerd/racknerd.py test
+```
+
+See [racknerd/README.md](racknerd/README.md) for full usage.
+
 ## License
 
 MIT

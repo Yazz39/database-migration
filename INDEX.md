@@ -9,6 +9,7 @@
 - `CONTRIBUTING.md` - Contribution guidelines
 - `SECURITY.md` - Security policy
 - `LICENSE` - MIT License
+- `racknerd/` - RackNerd VPS API skill (SolusVM client API CLI)
 
 ## Supported Databases
 

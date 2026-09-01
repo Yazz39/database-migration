@@ -17,3 +17,27 @@ jobs:
           test -f SETUP.md
           test -f EXAMPLES.md
           test -f LICENSE
+
+  racknerd:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Validate racknerd skill structure
+        run: |
+          test -f racknerd/SKILL.md
+          test -f racknerd/README.md
+          test -f racknerd/.env.example
+          test -x racknerd/racknerd.py
+      - name: Run racknerd tests
+        run: python3 -m unittest discover -s racknerd -v
+      - name: Ensure no credentials are committed
+        run: |
+          if grep -rInE 'RACKNERD_API_(KEY|HASH)=[^[:space:]"'"'"']+' \
+               --include='*' --exclude-dir=.git . \
+             | grep -vE '\.env\.example|your-api-(key|hash)-here'; then
+            echo "::error::A real-looking credential is committed."
+            exit 1
+          fi
